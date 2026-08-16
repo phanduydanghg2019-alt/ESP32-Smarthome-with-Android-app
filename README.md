@@ -68,19 +68,19 @@ cd SmartHome-IoT
 #### 2. Mobile App Setup
 
 # Navigate to the mobile app directory
-
+```bash
 cd MobileApp
-
+```
 # Install dependencies
-
+```bash
 npm install
-
+```
 # Add your google-services.json to android/app/ (for Android)
 
 # Run on Android / iOS
-
+```bash
 npx react-native run-android
-
+```
 #### 3. Firmware Setup
 
 3.1 Open the /Firmware directory in Arduino IDE.
