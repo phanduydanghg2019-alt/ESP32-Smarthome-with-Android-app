@@ -1,0 +1,14 @@
+{
+  "extends": "@react-native/typescript-config",
+  "compilerOptions": {
+    // "allowJs": false, // Không cần thiết khi code hoàn toàn bằng TS
+    "strict": false, // Vẫn giữ strict: false để dễ dàng debug ban đầu
+    "noEmit": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true, // Để bỏ qua kiểm tra kiểu trong node_modules
+    "forceConsistentCasingInFileNames": true // Đảm bảo việc dùng casing tên file nhất quán
+  },
+  "include": ["**/*.ts", "**/*.tsx", "types.d.ts"], // <-- Đảm bảo types.d.ts được bao gồm
+  "exclude": ["node_modules", "babel.config.js", "metro.config.js", "jest.config.js"]
+}

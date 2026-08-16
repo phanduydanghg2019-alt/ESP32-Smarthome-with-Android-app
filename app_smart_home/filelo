@@ -1,0 +1,1225 @@
+import React, {
+  useState,
+  useContext,
+  createContext,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+} from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  FlatList,
+  StyleSheet,
+  Switch,
+  Alert,
+  StatusBar,
+  useColorScheme,
+  ActivityIndicator,
+  ScrollView,
+  Modal,
+  Platform,
+  TextProps,
+} from 'react-native';
+import {
+  NavigationContainer,
+  DefaultTheme,
+  DarkTheme,
+  Theme as NavigationTheme,
+} from '@react-navigation/native';
+import {
+  createBottomTabNavigator,
+  BottomTabScreenProps,
+} from '@react-navigation/bottom-tabs';
+import {
+  createNativeStackNavigator,
+  NativeStackScreenProps,
+} from '@react-navigation/native-stack';
+
+// --- ICONS ---
+type IoniconProps = TextProps & { name: string; size?: number; color?: string };
+type IoniconComponent = React.ComponentType<IoniconProps>;
+const IoniconsModule = require('react-native-vector-icons/Ionicons');
+const Ionicons: IoniconComponent = IoniconsModule.default || IoniconsModule;
+
+// --- FIREBASE IMPORTS (REALTIME DATABASE ONLY) ---
+import { 
+  ref, 
+  push, 
+  set, 
+  update, 
+  remove, 
+  onValue, 
+  query, 
+  limitToLast,
+  serverTimestamp 
+} from 'firebase/database';
+import { db } from './firebaseConfig'; // Đảm bảo file này export 'db' từ getDatabase()
+import auth, { FirebaseAuthTypes } from '@react-native-firebase/auth';
+
+// --- DATA MODELS ---
+
+// Cấu hình màu sắc
+interface ThemeColors {
+  primary: string;
+  background: string;
+  card: string;
+  text: string;
+  subText: string;
+  border: string;
+  danger: string;
+  success: string;
+}
+
+export interface ThemeContextType {
+  isDarkMode: boolean;
+  setIsDarkMode: (value: boolean) => void;
+  theme: ThemeColors;
+  navTheme: NavigationTheme;
+}
+
+// Auth Types
+interface AuthUser {
+  uid: string;
+  email: string | null;
+}
+
+export interface AuthContextType {
+  user: AuthUser | null;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
+}
+
+// App Data Models
+interface Device {
+  id: string;
+  name: string;
+  type: 'light' | 'fan';
+  pin: number;
+  state: boolean;
+}
+
+interface Room {
+  id: string;
+  name: string;
+  devices: Device[];
+}
+
+interface HistoryItem {
+  id: string;
+  content: string;
+  time: string;
+  timestamp: number; // Lưu timestamp dạng số (epoch) thay vì Firestore Timestamp
+}
+
+interface SensorsData {
+  temperature: number | null;
+  humidity: number | null;
+  isRaining: boolean;
+}
+
+export interface AppContextType {
+  rooms: Room[];
+  history: HistoryItem[];
+  sensorsData: SensorsData;
+  shelterState: boolean;
+  mainDoorOpen: boolean;
+  addRoom: (name: string) => Promise<void>;
+  deleteRoom: (roomId: string, roomName: string) => Promise<void>;
+  addDevice: (
+    roomId: string,
+    name: string,
+    pin: number,
+    type?: 'light' | 'fan',
+  ) => Promise<void>;
+  toggleDevice: (
+    roomId: string,
+    deviceId: string,
+    deviceName: string,
+    roomName: string,
+    currentState: boolean,
+  ) => Promise<void>;
+  fetchSensorDataFromESP32: () => Promise<void>;
+  sendCommandToESP32: (
+    deviceId: string,
+    command: string,
+    value: any,
+  ) => Promise<boolean>;
+  controlShelter: (state: boolean) => Promise<void>;
+  controlMainDoor: (state: boolean) => Promise<void>;
+}
+
+// --- Navigation Types ---
+export type RootStackParamList = {
+  HomeScreen: undefined;
+  RoomDetail: { roomId: string; title: string };
+};
+
+export type RootTabParamList = {
+  Home: undefined;
+  History: undefined;
+  Profile: undefined;
+};
+
+declare global {
+  namespace ReactNavigation {
+    interface RootParamList extends RootStackParamList, RootTabParamList {}
+  }
+}
+
+type HomeScreenNavigationProp = NativeStackScreenProps<RootStackParamList, 'HomeScreen'>;
+type RoomDetailScreenNavigationProp = NativeStackScreenProps<RootStackParamList, 'RoomDetail'>;
+type TabBarScreenProps<RouteName extends keyof RootTabParamList> = BottomTabScreenProps<RootTabParamList, RouteName>;
+
+// ========================================================================================
+//                             THỰC THI (IMPLEMENTATION)
+// ========================================================================================
+
+// --- THEME ---
+const lightColors: ThemeColors = {
+  primary: '#007AFF',
+  background: '#F2F2F7',
+  card: '#FFFFFF',
+  text: '#000000',
+  subText: '#8E8E93',
+  border: '#C6C6C8',
+  danger: '#FF3B30',
+  success: '#34C759',
+};
+
+const darkColors: ThemeColors = {
+  primary: '#0A84FF',
+  background: '#000000',
+  card: '#1C1C1E',
+  text: '#FFFFFF',
+  subText: '#8E8E93',
+  border: '#38383A',
+  danger: '#FF453A',
+  success: '#30D158',
+};
+
+// --- CONTEXT ---
+const defaultAuthContext: AuthContextType = {
+  user: null,
+  login: async () => {},
+  logout: async () => {},
+};
+const AuthContext = createContext<AuthContextType>(defaultAuthContext);
+
+const defaultAppContext: AppContextType = {
+  rooms: [],
+  history: [],
+  sensorsData: { temperature: null, humidity: null, isRaining: false },
+  shelterState: false,
+  mainDoorOpen: false,
+  addRoom: async () => {},
+  deleteRoom: async () => {},
+  addDevice: async () => {},
+  toggleDevice: async () => {},
+  fetchSensorDataFromESP32: async () => {},
+  sendCommandToESP32: async () => true,
+  controlShelter: async () => {},
+  controlMainDoor: async () => {},
+};
+const AppContext = createContext<AppContextType>(defaultAppContext);
+
+const defaultThemeContext: ThemeContextType = {
+  isDarkMode: false,
+  setIsDarkMode: () => {},
+  theme: lightColors,
+  navTheme: DefaultTheme,
+};
+const ThemeContext = createContext<ThemeContextType>(defaultThemeContext);
+
+// 1. Theme Provider
+const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const systemScheme = useColorScheme();
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(systemScheme === 'dark');
+  const theme: ThemeColors = isDarkMode ? darkColors : lightColors;
+  const navTheme: NavigationTheme = isDarkMode ? DarkTheme : DefaultTheme;
+
+  navTheme.colors.background = theme.background;
+  navTheme.colors.card = theme.card;
+  navTheme.colors.text = theme.text;
+  navTheme.colors.border = theme.border;
+  navTheme.colors.primary = theme.primary;
+
+  return (
+    <ThemeContext.Provider value={{ isDarkMode, setIsDarkMode, theme, navTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+};
+
+const getAuthErrorMessage = (error?: FirebaseAuthTypes.NativeFirebaseAuthError | null): string => {
+  if (!error) return 'Đã xảy ra lỗi, vui lòng thử lại.';
+  switch (error.code) {
+    case 'auth/email-already-in-use': return 'Email đã được sử dụng.';
+    case 'auth/invalid-email': return 'Email không hợp lệ.';
+    case 'auth/weak-password': return 'Mật khẩu phải có ít nhất 6 ký tự.';
+    case 'auth/user-not-found':
+    case 'auth/wrong-password': return 'Email hoặc mật khẩu không đúng.';
+    default: return error.message || 'Đã xảy ra lỗi, vui lòng thử lại.';
+  }
+};
+
+// 2. Auth Provider
+const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+
+  useEffect(() => {
+    const subscriber = auth().onAuthStateChanged(_user => {
+      setUser(_user ? { uid: _user.uid, email: _user.email } : null);
+      if (loading) setLoading(false);
+    });
+    return subscriber;
+  }, []);
+
+  const login = async (email: string, password: string): Promise<void> => {
+    try {
+      setLoading(true);
+      await auth().signInWithEmailAndPassword(email, password);
+    } catch (error: any) {
+      const message = getAuthErrorMessage(error);
+      Alert.alert('Lỗi đăng nhập', message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const logout = async (): Promise<void> => {
+    try {
+      await auth().signOut();
+    } catch (error: any) {
+      Alert.alert('Lỗi đăng xuất', error.message);
+    }
+  };
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" />
+        <Text>Đang tải...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <AuthContext.Provider value={{ user, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+// 3. App Provider (SỬ DỤNG REALTIME DATABASE)
+const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user } = useContext(AuthContext);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [sensorsData, setSensorsData] = useState<SensorsData>({
+    temperature: null,
+    humidity: null,
+    isRaining: false,
+  });
+  const [shelterState, setShelterState] = useState<boolean>(false);
+  const [mainDoorOpen, setMainDoorOpen] = useState<boolean>(false);
+
+  // Helper để ghi lịch sử (DRY code)
+  const logHistory = useCallback((content: string) => {
+    if (!user?.uid) return;
+    const historyRef = ref(db, `users/${user.uid}/history`);
+    push(historyRef, {
+      content,
+      timestamp: Date.now(), // Sử dụng timestamp local hoặc serverTimestamp()
+    });
+  }, [user]);
+
+  // --- 1. LẤY DỮ LIỆU PHÒNG & THIẾT BỊ (REALTIME) ---
+  useEffect(() => {
+    if (!user) {
+      setRooms([]);
+      return;
+    }
+
+    const roomsRef = ref(db, `users/${user.uid}/rooms`);
+    
+    // Lắng nghe sự thay đổi của Rooms
+    const unsubscribe = onValue(roomsRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        // Chuyển đổi Object sang Array cho FlatList
+        const fetchedRooms: Room[] = Object.keys(data).map((key) => {
+            const roomData = data[key];
+            
+            // Xử lý devices (cũng là object trong RTDB)
+            const devicesObj = roomData.devices || {};
+            const devicesArray: Device[] = Object.keys(devicesObj).map(dKey => ({
+                id: dKey,
+                ...devicesObj[dKey]
+            }));
+
+            return {
+                id: key,
+                name: roomData.name,
+                devices: devicesArray
+            };
+        });
+        setRooms(fetchedRooms);
+      } else {
+        setRooms([]);
+      }
+    }, (error) => {
+        console.error("Lỗi đọc phòng:", error);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- 2. LẤY LỊCH SỬ HOẠT ĐỘNG (REALTIME) ---
+  useEffect(() => {
+    if (!user) {
+      setHistory([]);
+      return;
+    }
+    
+    // Lấy 20 mục lịch sử mới nhất
+    // Lưu ý: RTDB sắp xếp tăng dần, cần đảo ngược mảng ở client để hiện mới nhất lên đầu
+    const historyQuery = query(ref(db, `users/${user.uid}/history`), limitToLast(20));
+
+    const unsubscribe = onValue(historyQuery, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        const fetchedHistory: HistoryItem[] = Object.keys(data).map(key => ({
+            id: key,
+            content: data[key].content,
+            timestamp: data[key].timestamp,
+            time: new Date(data[key].timestamp).toLocaleString(),
+        }));
+        
+        // Sắp xếp giảm dần (Mới nhất lên đầu)
+        fetchedHistory.sort((a, b) => b.timestamp - a.timestamp);
+        
+        setHistory(fetchedHistory);
+      } else {
+        setHistory([]);
+      }
+    }, (error) => {
+        console.error("Lỗi đọc lịch sử:", error);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- MOCK CHỨC NĂNG ESP32 ---
+  const sendCommandToESP32 = useCallback(
+    async (deviceId: string, command: string, value: any): Promise<boolean> => {
+      console.log(`[ESP32 Mock] Gửi lệnh: Thiết bị ${deviceId}, Lệnh: ${command}, Giá trị: ${value}`);
+      return true;
+    },
+    [],
+  );
+
+  const fetchSensorDataFromESP32 = useCallback(async (): Promise<void> => {
+    // console.log('[ESP32 Mock] Đang lấy dữ liệu cảm biến...');
+    const temp = Math.floor(Math.random() * (35 - 20 + 1)) + 20;
+    const hum = Math.floor(Math.random() * (90 - 40 + 1)) + 40;
+    const isRainingNow = Math.random() < 0.3;
+    setSensorsData({
+      temperature: temp,
+      humidity: hum,
+      isRaining: isRainingNow,
+    });
+    // Giả lập logic tự động
+    setShelterState(prev => (isRainingNow ? false : prev));
+  }, []);
+
+  const controlShelter = useCallback(async (state: boolean): Promise<void> => {
+      console.log(`[ESP32 Mock] Kéo mái che ${state ? 'MỞ' : 'ĐÓNG'}`);
+      setShelterState(state);
+      logHistory(`${state ? 'Mở' : 'Đóng'} mái che`);
+    },
+    [logHistory],
+  );
+
+  const controlMainDoor = useCallback(async (state: boolean): Promise<void> => {
+      console.log(`[ESP32 Mock] ${state ? 'MỞ' : 'ĐÓNG'} cửa chính`);
+      setMainDoorOpen(state);
+      Alert.alert('Cửa chính', `Đã ${state ? 'mở' : 'đóng'} cửa chính.`);
+      logHistory(`${state ? 'Mở' : 'Đóng'} cửa chính`);
+    },
+    [logHistory],
+  );
+
+  useEffect(() => {
+    if (sensorsData.isRaining && !shelterState) {
+      controlShelter(true);
+    } else if (!sensorsData.isRaining && shelterState) {
+      controlShelter(false);
+    }
+  }, [sensorsData.isRaining, shelterState, controlShelter]);
+
+  useEffect(() => {
+    fetchSensorDataFromESP32();
+    const interval = setInterval(fetchSensorDataFromESP32, 5000);
+    return () => clearInterval(interval);
+  }, [fetchSensorDataFromESP32]);
+  // --- KẾT THÚC MOCK ---
+
+  // --- CRUD FUNCTIONS (REALTIME DATABASE) ---
+
+  // Tìm hàm addRoom cũ và thay bằng hàm này:
+  const addRoom = async (name: string): Promise<void> => {
+    if (!name.trim()) {
+        Alert.alert('Lỗi', 'Tên phòng không được để trống');
+        return;
+    }
+    if (!user?.uid) {
+        Alert.alert('Lỗi', 'Chưa đăng nhập');
+        return;
+    }
+
+    try {
+        console.log('Đang tạo phòng:', name, 'cho user:', user.uid);
+        
+        // 1. Tạo reference
+        const roomsRef = ref(db, `users/${user.uid}/rooms`);
+        
+        // 2. Push dữ liệu
+        // Mẹo: Thêm createdAt để node không bị coi là rỗng nếu devices chưa có gì
+        await push(roomsRef, {
+            name: name.trim(),
+            createdAt: serverTimestamp(), 
+            // Không cần truyền devices: {} vì Firebase sẽ tự xóa nó
+        });
+
+        console.log('Đã tạo phòng thành công');
+        logHistory(`Thêm phòng "${name}"`);
+        
+        // Đóng modal nếu đang mở (đảm bảo state này được cập nhật ở component gọi hàm)
+    } catch (error: any) {
+        console.error('Lỗi addRoom:', error);
+        Alert.alert('Lỗi tạo phòng', error.message);
+    }
+  };
+
+  const deleteRoom = async (roomId: string, roomName: string): Promise<void> => {
+    if (!roomId || !user?.uid) return;
+    try {
+      const roomRef = ref(db, `users/${user.uid}/rooms/${roomId}`);
+      await remove(roomRef);
+      logHistory(`Xóa phòng "${roomName}"`);
+    } catch (error: any) {
+      Alert.alert('Lỗi', 'Không thể xóa phòng: ' + error.message);
+    }
+  };
+
+  const addDevice = async (
+    roomId: string,
+    name: string,
+    pin: number,
+    type: 'light' | 'fan' = 'light',
+  ): Promise<void> => {
+    if (!name || !roomId || !user?.uid) return;
+    try {
+      // const pin = 36; // GPIO giả định
+      
+      // Thêm thiết bị vào bên trong node của phòng
+      // Cấu trúc: users/{uid}/rooms/{roomId}/devices/{deviceId}
+      const devicesRef = ref(db, `users/${user.uid}/rooms/${roomId}/devices`);
+      await push(devicesRef, {
+        name,
+        type,
+        pin: Number(pin),
+        state: false,
+      });
+
+      logHistory(`Thêm thiết bị "${name}" (GPIO ${pin})`);
+    } catch (error: any) {
+      Alert.alert('Lỗi', 'Không thể thêm thiết bị: ' + error.message);
+    }
+  };
+
+  const toggleDevice = async (
+    roomId: string,
+    deviceId: string,
+    deviceName: string,
+    roomName: string,
+    currentState: boolean,
+  ): Promise<void> => {
+    if (!user?.uid) return;
+    const newState = !currentState;
+    try {
+      // Cập nhật trạng thái tại đúng đường dẫn của thiết bị
+      const devicePath = `users/${user.uid}/rooms/${roomId}/devices/${deviceId}`;
+      await update(ref(db, devicePath), {
+        state: newState,
+      });
+
+      // Gửi lệnh ESP32 mock
+      await sendCommandToESP32(deviceId, newState ? 'ON' : 'OFF', newState);
+
+      logHistory(`${newState ? 'Bật' : 'Tắt'} ${deviceName} tại ${roomName}`);
+    } catch (error: any) {
+      Alert.alert('Lỗi', 'Không thể cập nhật thiết bị: ' + error.message);
+      console.error(error);
+    }
+  };
+
+  return (
+    <AppContext.Provider
+      value={{
+        rooms,
+        history,
+        sensorsData,
+        shelterState,
+        mainDoorOpen,
+        addRoom,
+        deleteRoom,
+        addDevice,
+        toggleDevice,
+        fetchSensorDataFromESP32,
+        sendCommandToESP32,
+        controlShelter,
+        controlMainDoor,
+      }}
+    >
+      {children}
+    </AppContext.Provider>
+  );
+};
+
+// --- CÁC MÀN HÌNH (SCREENS) ---
+
+// Màn hình Đăng nhập (Dùng Firebase Auth)
+const LoginScreen: React.FC = () => {
+  const { login } = useContext(AuthContext);
+  const { theme } = useContext(ThemeContext);
+  const [email, setEmail] = useState<string>('');
+  const [password, setPassword] = useState<string>('');
+
+  const register = async (): Promise<void> => {
+    const trimmedEmail = email.trim();
+    const trimmedPassword = password.trim();
+
+    if (!trimmedEmail || !trimmedPassword) {
+      Alert.alert('Lỗi đăng ký', 'Vui lòng nhập đầy đủ email và mật khẩu.');
+      return;
+    }
+
+    if (trimmedPassword.length < 6) {
+      Alert.alert('Lỗi đăng ký', 'Mật khẩu phải có ít nhất 6 ký tự.');
+      return;
+    }
+
+    try {
+      await auth().createUserWithEmailAndPassword(trimmedEmail, trimmedPassword);
+      Alert.alert('Thành công', 'Tài khoản đã được tạo!');
+    } catch (error: any) {
+      const message = getAuthErrorMessage(error);
+      Alert.alert('Lỗi đăng ký', message);
+    }
+  };
+
+  return (
+    <View style={[styles.centerContainer, { backgroundColor: theme.background }]}>
+      <Ionicons name="home" size={80} color={theme.primary} style={{ marginBottom: 20 }} />
+      <Text style={[styles.title, { color: theme.text }]}>Smart Home</Text>
+
+      <TextInput
+        placeholder="Email"
+        placeholderTextColor={theme.subText}
+        style={[styles.input, { backgroundColor: theme.card, color: theme.text, borderColor: theme.border }]}
+        value={email}
+        onChangeText={setEmail}
+        keyboardType="email-address"
+        autoCapitalize="none"
+      />
+
+      <TextInput
+        placeholder="Mật khẩu"
+        placeholderTextColor={theme.subText}
+        style={[styles.input, { backgroundColor: theme.card, color: theme.text, borderColor: theme.border }]}
+        value={password}
+        onChangeText={setPassword}
+        secureTextEntry
+      />
+
+      <TouchableOpacity style={[styles.btn, { backgroundColor: theme.primary, marginBottom: 10 }]} onPress={() => login(email, password)}>
+        <Text style={{ color: '#fff', fontWeight: 'bold' }}>ĐĂNG NHẬP</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={[styles.btn, { backgroundColor: theme.subText }]} onPress={register}>
+        <Text style={{ color: '#fff', fontWeight: 'bold' }}>ĐĂNG KÝ</Text>
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+// Tab 1: Trang chủ
+const HomeScreen: React.FC<HomeScreenNavigationProp> = ({ navigation }) => {
+  const {
+    rooms,
+    sensorsData,
+    shelterState,
+    controlShelter,
+    mainDoorOpen,
+    controlMainDoor,
+    addRoom,
+    deleteRoom,
+  } = useContext(AppContext);
+  const { theme } = useContext(ThemeContext);
+  const [isAddRoomVisible, setIsAddRoomVisible] = useState(false);
+  const [newRoomName, setNewRoomName] = useState('');
+
+  const handleAddRoom = () => {
+    setIsAddRoomVisible(true);
+  };
+
+  const handleConfirmAddRoom = async () => {
+    const name = newRoomName.trim();
+    if (name) {
+      await addRoom(name);
+    } else {
+      Alert.alert('Thông báo', 'Tên phòng không được bỏ trống.');
+    }
+    setNewRoomName('');
+    setIsAddRoomVisible(false);
+  };
+
+  const handleDeleteRoom = (roomId: string, roomName: string) => {
+    Alert.alert('Xóa phòng', `Bạn có chắc muốn xóa "${roomName}"?`, [
+      { text: 'Hủy', style: 'cancel' },
+      { text: 'Xóa', style: 'destructive', onPress: () => deleteRoom(roomId, roomName) },
+    ]);
+  };
+
+  const renderRoomItem = ({ item }: { item: Room }) => (
+    <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+      <TouchableOpacity
+        style={{ flex: 1 }}
+        onPress={() => navigation.navigate('RoomDetail', { roomId: item.id, title: item.name })}
+      >
+        <Text style={[styles.cardTitle, { color: theme.text }]}>{item.name}</Text>
+        <Text style={{ color: theme.subText }}>{item.devices.length} thiết bị</Text>
+      </TouchableOpacity>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <TouchableOpacity onPress={() => handleDeleteRoom(item.id, item.name)} style={styles.iconButton}>
+          <Ionicons name="trash" size={22} color={theme.danger} />
+        </TouchableOpacity>
+        <Ionicons name="chevron-forward" size={24} color={theme.subText} />
+      </View>
+    </View>
+  );
+
+  return (
+    <View style={{ flex: 1, backgroundColor: theme.background }}>
+      <ScrollView style={{ flex: 1 }}>
+        <View style={[styles.section, { borderBottomColor: theme.border }]}>
+          <Text style={[styles.sectionTitle, { color: theme.text }]}>Cảm biến & Điều khiển</Text>
+          <View style={[styles.sensorCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <View style={styles.sensorRow}>
+              <Ionicons name="thermometer-outline" size={24} color={theme.primary} />
+              <Text style={[styles.sensorText, { color: theme.text }]}>Nhiệt độ: {sensorsData.temperature ?? '--'} °C</Text>
+            </View>
+            <View style={styles.sensorRow}>
+              <Ionicons name="water-outline" size={24} color={theme.primary} />
+              <Text style={[styles.sensorText, { color: theme.text }]}>Độ ẩm: {sensorsData.humidity ?? '--'} %</Text>
+            </View>
+            <View style={styles.sensorRow}>
+              <Ionicons name="cloud-outline" size={24} color={sensorsData.isRaining ? theme.danger : theme.success} />
+              <Text style={[styles.sensorText, { color: sensorsData.isRaining ? theme.danger : theme.text }]}>
+                {sensorsData.isRaining ? 'Có mưa!' : 'Không mưa'}
+              </Text>
+            </View>
+            <View style={styles.sensorRow}>
+              <Ionicons name="umbrella-outline" size={24} color={theme.primary} />
+              <Text style={[styles.sensorText, { color: theme.text }]}>Mái che:</Text>
+              <Switch value={shelterState} onValueChange={controlShelter} trackColor={{ true: theme.primary, false: theme.subText }} />
+              <Text style={[styles.sensorText, { color: theme.text, marginLeft: 5 }]}>{shelterState ? 'Mở' : 'Đóng'}</Text>
+            </View>
+            <View style={styles.sensorRow}>
+              <Ionicons name={mainDoorOpen ? 'enter-outline' : 'exit-outline'} size={24} color={theme.primary} />
+              <Text style={[styles.sensorText, { color: theme.text }]}>Cửa chính:</Text>
+              <Switch value={mainDoorOpen} onValueChange={controlMainDoor} trackColor={{ true: theme.primary, false: theme.subText }} />
+              <Text style={[styles.sensorText, { color: theme.text, marginLeft: 5 }]}>{mainDoorOpen ? 'Mở' : 'Đóng'}</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: theme.text }]}>Các phòng</Text>
+          <FlatList
+            data={rooms}
+            keyExtractor={item => item.id}
+            renderItem={renderRoomItem}
+            scrollEnabled={false}
+            ListEmptyComponent={<Text style={{ textAlign: 'center', color: theme.subText, marginTop: 20 }}>Chưa có phòng nào</Text>}
+          />
+        </View>
+      </ScrollView>
+      <TouchableOpacity style={[styles.fab, { backgroundColor: theme.primary }]} onPress={handleAddRoom}>
+        <Ionicons name="add" size={30} color="#FFF" />
+      </TouchableOpacity>
+      <Modal visible={isAddRoomVisible} transparent animationType="fade" onRequestClose={() => setIsAddRoomVisible(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalContainer, { backgroundColor: theme.card }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>Thêm phòng mới</Text>
+            <TextInput
+              placeholder="Tên phòng"
+              value={newRoomName}
+              onChangeText={setNewRoomName}
+              placeholderTextColor={theme.subText}
+              style={[styles.input, { backgroundColor: theme.background, color: theme.text, borderColor: theme.border, width: '100%' }]}
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={[styles.modalButton, { borderColor: theme.border }]} onPress={() => { setNewRoomName(''); setIsAddRoomVisible(false); }}>
+                <Text style={{ color: theme.text }}>Hủy</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalButton, { backgroundColor: theme.primary }]} onPress={handleConfirmAddRoom}>
+                <Text style={{ color: '#fff', fontWeight: 'bold' }}>Thêm</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+};
+
+// Tab 1 (Con): Chi tiết phòng
+const RoomDetailScreen: React.FC<RoomDetailScreenNavigationProp> = ({ route, navigation }) => {
+  const { roomId, title } = route.params;
+  const { rooms, addDevice, toggleDevice } = useContext(AppContext);
+  const { theme } = useContext(ThemeContext);
+  const [isAddDeviceVisible, setIsAddDeviceVisible] = useState(false);
+  const [newDeviceName, setNewDeviceName] = useState('');
+  const [newDevicePin, setNewDevicePin] = useState('');
+  const [newDeviceType, setNewDeviceType] = useState<'light' | 'fan'>('light');
+
+  useLayoutEffect(() => {
+    navigation.setOptions({ title });
+  }, [navigation, title]);
+
+  const room = rooms.find(r => r.id === roomId);
+  
+  const handleAddDevice = () => {
+    setIsAddDeviceVisible(true);
+    const handleConfirmAddDevice = async () => {
+      const name = newDeviceName.trim();
+      const pin = Number(newDevicePin);
+      if (!name) {
+        Alert.alert('Thông báo', 'Tên thiết bị không được để trống.');
+        return;
+      }
+      if (isNaN(pin) || pin <= 0) {
+        Alert.alert('Thông báo', 'GPIO không hợp lệ.');
+        return;
+      }
+      await addDevice(roomId, name, pin, newDeviceType);
+      setNewDeviceName('');
+      setNewDevicePin('');
+      setNewDeviceType('light');
+      setIsAddDeviceVisible(false);
+    }
+  };
+
+  const renderDevice = ({ item }: { item: Device }) => (
+    <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <Ionicons
+          name={item.type === 'fan' ? (item.state ? 'ellipse' : 'power-outline') : (item.state ? 'bulb' : 'bulb-outline')}
+          size={28}
+          color={item.state ? (item.type === 'fan' ? theme.success : '#FFD700') : theme.subText}
+        />
+        <Text style={[styles.cardTitle, { color: theme.text, marginLeft: 15 }]}>{item.name}</Text>
+      </View>
+      <Switch
+        value={item.state}
+        onValueChange={() => toggleDevice(roomId, item.id, item.name, title, item.state)}
+        trackColor={{ true: theme.primary, false: theme.subText }}
+      />
+    </View>
+  );
+
+  return (
+    <View style={{ flex: 1, backgroundColor: theme.background }}>
+      <FlatList
+        data={room ? room.devices : []}
+        keyExtractor={item => item.id}
+        renderItem={renderDevice}
+        contentContainerStyle={{ padding: 15 }}
+        ListEmptyComponent={<Text style={{ textAlign: 'center', color: theme.subText, marginTop: 20 }}>Chưa có thiết bị nào.</Text>}
+      />
+      <TouchableOpacity style={[styles.fab, { backgroundColor: theme.primary }]} onPress={handleAddDevice}>
+        <Ionicons name="add" size={30} color="#FFF" />
+      </TouchableOpacity>
+      <Modal visible={isAddDeviceVisible} transparent animationType="fade" onRequestClose={() => setIsAddDeviceVisible(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalContainer, { backgroundColor: theme.card }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>Thêm thiết bị</Text>
+            <TextInput
+              placeholder="Tên thiết bị"
+              placeholderTextColor={theme.subText}
+              value={newDeviceName}
+              onChangeText={setNewDeviceName}
+              style={[styles.input, { backgroundColor: theme.background, color: theme.text, borderColor: theme.border, width: '100%' }]}
+            />
+            <TextInput
+              placeholder="GPIO (Số chân)"
+              placeholderTextColor={theme.subText}
+              value={newDevicePin}
+              onChangeText={setNewDevicePin}
+              keyboardType="numeric"
+              style={[styles.input, { backgroundColor: theme.background, color: theme.text, borderColor: theme.border, width: '100%' }]}
+            />
+            <View style={styles.typeSelector}>
+              {(['light', 'fan'] as const).map(type => (
+                <TouchableOpacity
+                  key={type}
+                  style={[
+                    styles.typeOption,
+                    {
+                      borderColor: type === newDeviceType ? theme.primary : theme.border,
+                      backgroundColor: type === newDeviceType ? theme.primary : 'transparent',
+                    },
+                  ]}
+                  onPress={() => setNewDeviceType(type)}
+                >
+                  <Text style={{ color: type === newDeviceType ? '#fff' : theme.text }}>{type === 'light' ? 'Đèn' : 'Quạt'}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={[styles.modalButton, { borderColor: theme.border }]} onPress={() => { setIsAddDeviceVisible(false); setNewDeviceName(''); setNewDeviceType('light'); }}>
+                <Text style={{ color: theme.text }}>Hủy</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalButton, { backgroundColor: theme.primary }]} onPress={handleConfirmAddDevice}>
+                <Text style={{ color: '#fff', fontWeight: 'bold' }}>Thêm</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+};
+
+// Tab 2: Lịch sử
+const HistoryScreen: React.FC<TabBarScreenProps<'History'>> = () => {
+  const { history } = useContext(AppContext);
+  const { theme } = useContext(ThemeContext);
+
+  return (
+    <View style={{ flex: 1, backgroundColor: theme.background }}>
+      <FlatList
+        data={history}
+        keyExtractor={item => item.id}
+        renderItem={({ item }: { item: HistoryItem }) => (
+          <View style={[styles.historyItem, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <Text style={{ color: theme.text, fontSize: 16 }}>{item.content}</Text>
+            <Text style={{ color: theme.subText, fontSize: 12, marginTop: 4 }}>{item.time}</Text>
+          </View>
+        )}
+        contentContainerStyle={{ padding: 15 }}
+        ListEmptyComponent={<Text style={{ textAlign: 'center', color: theme.subText, marginTop: 20 }}>Chưa có lịch sử hoạt động.</Text>}
+      />
+    </View>
+  );
+};
+
+// Tab 3: Cá nhân
+const ProfileScreen: React.FC<TabBarScreenProps<'Profile'>> = () => {
+  const { user, logout } = useContext(AuthContext);
+  const { isDarkMode, setIsDarkMode, theme } = useContext(ThemeContext);
+
+  interface ProfileItemProps {
+    icon: string;
+    text: string;
+    right?: React.ReactNode;
+    color?: string;
+    onPress?: () => void;
+  }
+
+  const Item: React.FC<ProfileItemProps> = ({ icon, text, right, color, onPress }) => (
+    <TouchableOpacity onPress={onPress} style={[styles.settingItem, { backgroundColor: theme.card, borderColor: theme.border }]}>
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <Ionicons name={icon} size={22} color={color || theme.primary} />
+        <Text style={{ marginLeft: 15, fontSize: 16, color: color || theme.text }}>{text}</Text>
+      </View>
+      {right}
+    </TouchableOpacity>
+  );
+
+  return (
+    <View style={{ flex: 1, backgroundColor: theme.background }}>
+      <View style={{ alignItems: 'center', padding: 30 }}>
+        <Ionicons name="person-circle" size={80} color={theme.subText} />
+        <Text style={{ fontSize: 20, fontWeight: 'bold', color: theme.text, marginTop: 10 }}>
+          {user ? (user.email ? user.email.split('@')[0] : 'Người dùng') : 'Chưa đăng nhập'}
+        </Text>
+        <Text style={[styles.profileEmail, { color: theme.text }]}>{user ? user.email : 'Chưa đăng nhập'}</Text>
+      </View>
+
+      <View style={[styles.section, { borderBottomColor: theme.border }]}>
+        <Text style={[styles.sectionTitle, { color: theme.text }]}>Cài đặt</Text>
+        <Item
+          icon="moon"
+          text="Chế độ tối"
+          right={<Switch value={isDarkMode} onValueChange={setIsDarkMode} trackColor={{ true: theme.primary, false: theme.subText }} />}
+        />
+        <Item icon="lock-closed" text="Đổi mật khẩu" right={<Ionicons name="chevron-forward" size={20} color={theme.subText} />} onPress={() => Alert.alert('Thông báo', 'Tính năng đang phát triển')} />
+        <Item icon="mail" text="Gửi phản hồi" right={<Ionicons name="chevron-forward" size={20} color={theme.subText} />} onPress={() => Alert.alert('Thông báo', 'Đã gửi phản hồi cho Admin')} />
+      </View>
+
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: theme.text }]}>Tài khoản</Text>
+        <Item icon="log-out" text="Đăng xuất" color={theme.danger} onPress={logout} />
+      </View>
+    </View>
+  );
+};
+
+// Stack Navigator
+const HomeStack: React.FC = () => {
+  const { theme } = useContext(ThemeContext);
+  const Stack = createNativeStackNavigator<RootStackParamList>();
+
+  return (
+    <Stack.Navigator
+      id={undefined}
+      screenOptions={{
+        headerStyle: { backgroundColor: theme.card },
+        headerTintColor: theme.text,
+        headerTitleStyle: { fontWeight: 'bold' } as const,
+      }}
+    >
+      <Stack.Screen name="HomeScreen" component={HomeScreen} options={{ title: 'Trang chủ Smart Home' }} />
+      <Stack.Screen name="RoomDetail" component={RoomDetailScreen} options={({ route }) => ({ title: route.params.title })} />
+    </Stack.Navigator>
+  );
+};
+
+// Main App component
+const MainApp: React.FC = () => {
+  const { theme, navTheme } = useContext(ThemeContext);
+  const Tab = createBottomTabNavigator<RootTabParamList>();
+
+  return (
+    <NavigationContainer theme={navTheme}>
+      <Tab.Navigator
+        id={undefined}
+        screenOptions={({ route }) => ({
+          tabBarIcon: ({ focused, color, size }) => {
+            let iconName: string;
+            if (route.name === 'Home') iconName = focused ? 'home' : 'home-outline';
+            else if (route.name === 'History') iconName = focused ? 'time' : 'time-outline';
+            else iconName = focused ? 'person' : 'person-outline';
+            return <Ionicons name={iconName} size={size} color={color} />;
+          },
+          tabBarActiveTintColor: theme.primary,
+          tabBarInactiveTintColor: theme.subText,
+          headerShown: false,
+          tabBarStyle: { backgroundColor: theme.card, borderTopColor: theme.border },
+          tabBarLabelStyle: { fontSize: 12 },
+        })}
+      >
+        <Tab.Screen name="Home" component={HomeStack} options={{ title: 'Trang chủ' }} />
+        <Tab.Screen name="History" component={HistoryScreen} options={{ title: 'Lịch sử', headerShown: true, headerStyle: { backgroundColor: theme.card }, headerTintColor: theme.text, headerTitleStyle: { fontWeight: 'bold' } as const }} />
+        <Tab.Screen name="Profile" component={ProfileScreen} options={{ title: 'Cá nhân', headerShown: true, headerStyle: { backgroundColor: theme.card }, headerTintColor: theme.text, headerTitleStyle: { fontWeight: 'bold' } as const }} />
+      </Tab.Navigator>
+    </NavigationContainer>
+  );
+};
+
+const AppContent: React.FC = () => {
+  const { user } = useContext(AuthContext);
+  const { isDarkMode, theme } = useContext(ThemeContext);
+
+  return (
+    <>
+      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} backgroundColor={theme.background} />
+      {user ? <AppProvider><MainApp /></AppProvider> : <LoginScreen />}
+    </>
+  );
+};
+
+const App = () => {
+  const [isAppReady, setIsAppReady] = useState(false);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => setIsAppReady(true), 1000);
+    return () => clearTimeout(timeout);
+  }, []);
+
+  if (!isAppReady) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" />
+        <Text>Đang khởi tạo ứng dụng...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <ThemeProvider>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
+    </ThemeProvider>
+  );
+};
+
+export default App;
+
+// ========================================================================================
+//                                  STYLESHEET
+// ========================================================================================
+
+const styles = StyleSheet.create({
+  centerContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    marginBottom: 30,
+  },
+  input: {
+    width: '100%',
+    padding: 15,
+    marginVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    fontSize: 16,
+  },
+  btn: {
+    width: '100%',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  section: {
+    padding: 15,
+    marginBottom: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 15,
+  },
+  sensorCard: {
+    padding: 15,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  sensorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  sensorText: {
+    fontSize: 16,
+    marginLeft: 10,
+  },
+  card: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 15,
+    marginVertical: 5,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  fab: {
+    position: 'absolute',
+    width: 60,
+    height: 60,
+    alignItems: 'center',
+    justifyContent: 'center',
+    right: 20,
+    bottom: 20,
+    borderRadius: 30,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+  },
+  historyItem: {
+    padding: 15,
+    marginVertical: 5,
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'column',
+  },
+  profileEmail: {
+    fontSize: 16,
+    marginTop: 10,
+  },
+  settingItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 15,
+    paddingHorizontal: 10,
+    marginVertical: 5,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  iconButton: {
+    padding: 6,
+    marginRight: 10,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContainer: {
+    width: '100%',
+    borderRadius: 12,
+    padding: 20,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 15,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 10,
+  },
+  modalButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    marginLeft: 10,
+    borderWidth: 1,
+  },
+  typeSelector: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  typeOption: {
+    flex: 1,
+    paddingVertical: 10,
+    marginHorizontal: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+  },
+});
