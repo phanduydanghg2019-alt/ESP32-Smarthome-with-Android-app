@@ -88,11 +88,11 @@ npx react-native run-android
 3.2 Install required libraries via Library Manager: Firebase ESP32 Client, DHT sensor library, ESP32Servo.
 
 3.3 Update your Wi-Fi credentials and Firebase config in the code:
-
+```bash
 #define WIFI_SSID "YOUR_WIFI_NAME"
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 #define API_KEY "YOUR_FIREBASE_API_KEY"
 #define DATABASE_URL "YOUR_FIREBASE_DATABASE_URL"
-
+```
 3.4 Connect your ESP32 board and click Upload.
 #
